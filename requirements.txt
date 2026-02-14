@@ -1,0 +1,17 @@
+streamlit
+google-generativeai
+python-pptx
+pymupdf
+Pillow
+pandas
+openpyxl
+python-docx
+scipy
+matplotlib
+pyreadstat
+seaborn
+openai
+fpdf
+graphviz
+plotly
+requests
