@@ -1030,7 +1030,12 @@ elif tool_mode == "LD Generator (Dissertation)":
                             
                             # Clean text: Remove the heading if the AI repeated it at the top
                             clean_text = section_text.replace(f"**{heading}**", "").replace(f"#{heading}", "").strip()
-                            doc.add_paragraph(clean_text)
+                            
+                            # Fix: Split into paragraphs to prevent justification "stretching" on last lines
+                            paragraphs = clean_text.splitlines()
+                            for p in paragraphs:
+                                if p.strip():
+                                    doc.add_paragraph(p.strip())
                             
                             full_document_text += f"\n\n{section_text}"
                             success = True
