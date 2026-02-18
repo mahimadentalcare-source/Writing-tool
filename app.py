@@ -1,7 +1,7 @@
 import streamlit as st
 import os
 import tempfile
-from utils import extract_text_and_images
+from utils import extract_text_and_images, add_markdown_table_to_docx, add_markdown_content
 from ppt_generator import generate_presentation
 import google.generativeai as genai
 import pandas as pd
@@ -908,6 +908,9 @@ elif tool_mode == "LD Generator (Dissertation)":
         st.info(f"Approx. Word Count: {ld_pages * 400} words")
 
     if ld_title and ld_synopsis and api_key:
+        
+        include_tables = st.checkbox("Include 2-4 Tables (where relevant)", value=False)
+        
         if st.button("Generate Dissertation"):
             st.info("Starting generation... This may take a moment for longer documents.")
             
@@ -988,6 +991,14 @@ elif tool_mode == "LD Generator (Dissertation)":
                     4. **REFERENCES (CRITICAL):** 
                        - Citation Format in Text: Use simple numbers as citations (e.g. "stated by Smith 5"). Do NOT use brackets, parentheses, or superscripts. Just the number 1, 2, 3 in normal text size.
                        {ref_instruction}
+
+                    6. **TABLES:**
+                       {
+                       f"- Please include a Markdown Table in this section if it is suitable (e.g. classification, comparison, or structured data)." 
+                       if include_tables else 
+                       "- Do NOT include any tables."
+                       }
+                       - If you include a table, ensure it is in standard Markdown format (with | and -).
                        
                     5. Content must be highly technical, postgraduate level.
                     
@@ -1031,12 +1042,47 @@ elif tool_mode == "LD Generator (Dissertation)":
                             # Clean text: Remove the heading if the AI repeated it at the top
                             clean_text = section_text.replace(f"**{heading}**", "").replace(f"#{heading}", "").strip()
                             
-                            # Fix: Split into paragraphs to prevent justification "stretching" on last lines
-                            paragraphs = clean_text.splitlines()
-                            for p in paragraphs:
-                                if p.strip():
-                                    doc.add_paragraph(p.strip())
+                            # --- Table Parsing Logic ---
+                            import re
+                            # Split text by code blocks or table patterns? 
+                            # Simplest valid markdown table detection: lines starting with |
                             
+                            lines = clean_text.splitlines()
+                            
+                            # We will reconstruct the document paragraph by paragraph, intercepting tables
+                            buffer_text = []
+                            table_buffer = []
+                            in_table = False
+                            
+                            for line in lines:
+                                stripped = line.strip()
+                                # Check for table row
+                                if stripped.startswith('|') and stripped.endswith('|'):
+                                    if not in_table:
+                                        # Flush text buffer
+                                        if buffer_text:
+                                            add_markdown_content(doc, "\n".join(buffer_text))
+                                            buffer_text = []
+                                        in_table = True
+                                    table_buffer.append(line)
+                                else:
+                                    if in_table:
+                                        # End of table
+                                        if table_buffer:
+                                            add_markdown_table_to_docx(doc, "\n".join(table_buffer))
+                                            table_buffer = []
+                                        in_table = False
+                                    
+                                    # Normal line
+                                    if stripped:
+                                        buffer_text.append(stripped)
+                                        
+                            # Flush remaining
+                            if in_table and table_buffer:
+                                add_markdown_table_to_docx(doc, "\n".join(table_buffer))
+                            elif buffer_text:
+                                add_markdown_content(doc, "\n".join(buffer_text))
+
                             full_document_text += f"\n\n{section_text}"
                             success = True
                             
