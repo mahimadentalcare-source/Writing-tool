@@ -15,3 +15,4 @@ fpdf
 graphviz
 plotly
 requests
+biopython

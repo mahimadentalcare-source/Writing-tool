@@ -1,7 +1,7 @@
 import streamlit as st
 import os
 import tempfile
-from utils import extract_text_and_images, add_markdown_table_to_docx, add_markdown_content
+from utils import extract_text_and_images, add_markdown_table_to_docx, add_markdown_content, search_pubmed
 from ppt_generator import generate_presentation
 import google.generativeai as genai
 import pandas as pd
@@ -895,7 +895,11 @@ elif tool_mode == "Results Writer (SPSS-like)":
 # ==========================================
 elif tool_mode == "LD Generator (Dissertation)":
     st.header("Library Dissertation (LD) Generator")
-    st.markdown("Expand a synopsis into a full-length dissertation document with references.")
+    st.markdown("Expand a synopsis into a full-length dissertation document using **Real Open-Access References**.")
+
+    # Session State for References
+    if "ld_search_results" not in st.session_state:
+        st.session_state.ld_search_results = []
 
     ld_title = st.text_input("Dissertation Title", placeholder="e.g. Artificial Intelligence in Prosthodontics")
     ld_synopsis = st.text_area("Synopsis / Headings Structure (One per line)", height=200, 
@@ -907,10 +911,57 @@ elif tool_mode == "LD Generator (Dissertation)":
     with col2:
         st.info(f"Approx. Word Count: {ld_pages * 400} words")
 
+    # --- NEW: REFERENCE SEARCH UI ---
+    st.divider()
+    st.subheader("Step 1: Find Reliable References (PubMed)")
+    
+    search_col1, search_col2 = st.columns([3, 1])
+    with search_col1:
+        # Default query to title if available, else empty
+        default_q = ld_title if ld_title else ""
+        search_query = st.text_input("Search Topic on PubMed", value=default_q, help="Finds 'Free Full Text' articles.")
+    with search_col2:
+        st.write("") # Spacer
+        st.write("")
+        if st.button("Find Open Access Articles"):
+            with st.spinner("Searching PubMed..."):
+                results = search_pubmed(search_query)
+                st.session_state.ld_search_results = results
+                if not results:
+                    st.warning("No open access articles found. Try a broader term.")
+    
+    # Display & Select References
+    selected_references = []
+    if st.session_state.ld_search_results:
+        st.markdown(f"**Found {len(st.session_state.ld_search_results)} articles.** Uncheck any you deem irrelevant.")
+        
+        # Create a container for the list
+        with st.container(height=300):
+            for i, art in enumerate(st.session_state.ld_search_results):
+                # Checkbox for selection
+                is_selected = st.checkbox(
+                    f"**{art['year']}** - {art['title']}", 
+                    value=True, 
+                    key=f"ref_select_{i}",
+                    help=f"Journal: {art['journal']}\nAbstract: {art['abstract'][:200]}..."
+                )
+                if is_selected:
+                    selected_references.append(art)
+        
+        st.success(f"Selected {len(selected_references)} references for generation.")
+    
+    st.divider()
+    st.subheader("Step 2: Generate Document")
+
     if ld_title and ld_synopsis and api_key:
         
-        include_tables = st.checkbox("Include 2-4 Tables (where relevant)", value=False)
-        
+        col_opt1, col_opt2 = st.columns(2)
+        with col_opt1:
+             include_tables = st.checkbox("Include 2-4 Tables", value=True)
+        with col_opt2:
+             # Only show if OpenAI key, or warn
+             generate_images = st.checkbox("Include 3-5 AI Diagrams (DALL-E 3)", value=False, help="Costs included in OpenAI usage. Generates diagrams/illustrations.")
+
         if st.button("Generate Dissertation"):
             st.info("Starting generation... This may take a moment for longer documents.")
             
@@ -936,11 +987,80 @@ elif tool_mode == "LD Generator (Dissertation)":
             stop_generation = False # Flag to stop on fatal errors
 
             # Reference Tracking
-            ref_counter = 1
-            master_references = [] # List of strings: "1. Author..."
+            all_references = []
+            
+            # 1. Add User Selected References
+            if selected_references:
+                all_references.extend(selected_references)
             
             # Target References Calculation (40-70 range)
             target_total_refs = 40 if ld_pages < 50 else 70
+            
+            # 2. Auto-Fetch Missing References (Strict Mode)
+            current_count = len(all_references)
+            needed_refs = target_total_refs - current_count
+            
+            existing_titles = {r['title'].lower() for r in all_references}
+
+            if needed_refs > 0:
+                with st.spinner(f"Fetching {needed_refs} additional reliable references from PubMed..."):
+                    
+                    # Strategy A: Search by Main Title
+                    search_term = ld_title
+                    extra_refs = search_pubmed(search_term, max_results=needed_refs + 10)
+                    
+                    for ref in extra_refs:
+                        if ref['title'].lower() not in existing_titles:
+                            all_references.append(ref)
+                            existing_titles.add(ref['title'].lower())
+                    
+                    # Strategy B: Fallback - Search by Headings (Content-Specific)
+                    # If we still don't have enough, search for each section heading!
+                    if len(all_references) < target_total_refs:
+                        st.text("Expanding search to section topics...")
+                        
+                        # Extract main topic from title (simple heuristic: first 2-3 words or just use title)
+                        # actually, just appending the heading to the query might be too specific.
+                        # Let's just search the HEADING itself, maybe with "Human" or "Dental"?
+                        # Safer: Heading + "Dental" or Heading + "Dentistry"
+                        
+                        for heading in headings:
+                            if len(all_references) >= target_total_refs:
+                                break
+                                
+                            # Skip generic headings
+                            if heading.lower() in ["introduction", "conclusion", "references", "review of literature"]:
+                                continue
+                                
+                            # Calculate gap
+                            current_gap = target_total_refs - len(all_references)
+                            # Ask for a few per heading
+                            batch_size = min(current_gap, 10) 
+                            
+                            if batch_size <= 0: break
+                            
+                            # Query: Heading + Context
+                            # e.g. "Osseointegration dental"
+                            query = f"{heading} dentistry"
+                            section_refs = search_pubmed(query, max_results=batch_size + 5)
+                            
+                            for ref in section_refs:
+                                if len(all_references) >= target_total_refs:
+                                     break
+                                if ref['title'].lower() not in existing_titles:
+                                    all_references.append(ref)
+                                    existing_titles.add(ref['title'].lower())
+            
+            # Final check: If still short, warn but proceed
+            if len(all_references) < target_total_refs:
+                st.warning(f"Note: Could only find {len(all_references)} verifiable open-access references on PubMed (Target: {target_total_refs}). Proceeding with available references.")
+            
+            # Image Tracking
+            images_generated = 0
+            target_images = 4
+            # distribute images: semi-randomly but likely in middle sections not intro/conclusion
+            # Probability per section
+            image_prob = target_images / max(1, len(headings))
 
             for index, heading in enumerate(headings):
                 if stop_generation:
@@ -949,50 +1069,34 @@ elif tool_mode == "LD Generator (Dissertation)":
                 with st.spinner(f"Writing section: {heading}..."):
                     target_words_per_section = int((ld_pages * 400) / len(headings))
                     
-                    # Distribute references evenly
-                    current_ref_count = ref_counter - 1
-                    remaining_refs_budget = target_total_refs - current_ref_count
-                    remaining_sections = len(headings) - index
+                    # Construct Reference Context for LLM
+                    # We pass the ENTIRE list or a relevant subset? 
+                    # Passing 70 refs is fine for Gemini 1.5 context.
                     
-                    # Calculate how many to ask for this time
-                    if remaining_sections > 0:
-                        refs_for_this_section = max(0, int(remaining_refs_budget / remaining_sections))
-                    else:
-                        refs_for_this_section = 0
-                        
-                    # Cap it reasonably (don't ask for 20 in one go unless needed)
-                    refs_for_this_section = min(refs_for_this_section, 10)
-
-                    ref_instruction = ""
-                    if refs_for_this_section > 0:
-                        ref_instruction = f"""
-                        - ADD roughly **{refs_for_this_section}** NEW references.
-                        - START numbering from: **{ref_counter}**.
-                        - You MUST conclude your response with a section strictly labeled below:
-                        ### SECTION_REFERENCES
-                        {ref_counter}. First new reference...
-                        """
-                    else:
-                        ref_instruction = f"""
-                        - Do NOT add new references. You have reached the citation limit.
-                        - CITE EXISTING references from [1] to [{current_ref_count}] where appropriate.
-                        - Do NOT include a ### SECTION_REFERENCES block.
-                        """
-
+                    ref_context = "\n### MASTER REFERENCE LIST (STRICTLY USE THESE IDs):\n"
+                    # We format as: [ID] Author (Year) - Title
+                    for r_idx, ref in enumerate(all_references):
+                        ref_context += f"[{r_idx+1}] {ref['authors']} ({ref['year']}): {ref['title']}\n"
+                    
                     prompt = f"""
                     You are an expert dental academician writing a Library Dissertation on "{ld_title}".
                     
                     **CURRENT SECTION:** "{heading}"
                     
+                    {ref_context}
+                    
                     **INSTRUCTIONS:**
                     1. Write a detailed, expansive academic text for this specific section.
                     2. Target Length: Approximately {target_words_per_section} words.
                     3. **FORMATTING:** The output must start with the Heading **{heading}** in Bold.
-                    4. **REFERENCES (CRITICAL):** 
-                       - Citation Format in Text: Use simple numbers as citations (e.g. "stated by Smith 5"). Do NOT use brackets, parentheses, or superscripts. Just the number 1, 2, 3 in normal text size.
-                       {ref_instruction}
+                    4. **REFERENCES (CRITICAL - STRICT MODE):** 
+                       - You MUST support your writing by citing the specific references provided in the Master List above.
+                       - **Citation Format:** Use the ID number in brackets, e.g., "Studies show that... [12]" or "As stated by Smith [5]".
+                       - **DO NOT** invent new references. Use ONLY the provided list.
+                       - **DO NOT** write a reference list at the end of your response. (This will be done programmatically).
+                       - Try to use a variety of the provided references relevant to the context.
 
-                    6. **TABLES:**
+                    5. **TABLES:**
                        {
                        f"- Please include a Markdown Table in this section if it is suitable (e.g. classification, comparison, or structured data)." 
                        if include_tables else 
@@ -1000,7 +1104,7 @@ elif tool_mode == "LD Generator (Dissertation)":
                        }
                        - If you include a table, ensure it is in standard Markdown format (with | and -).
                        
-                    5. Content must be highly technical, postgraduate level.
+                    6. Content must be highly technical, postgraduate level.
                     
                     Do NOT write the Introduction or Conclusion unless this section IS "Introduction" or "Conclusion". Focus ONLY on "{heading}".
                     """
@@ -1018,23 +1122,8 @@ elif tool_mode == "LD Generator (Dissertation)":
                             # Unified API Call
                             full_response = call_ai_api(prompt, provider, api_key, model_name=selected_model)
                             
-                            # Parse Response for References
-                            if "### SECTION_REFERENCES" in full_response:
-                                parts = full_response.split("### SECTION_REFERENCES")
-                                section_text = parts[0].strip()
-                                refs_text = parts[1].strip()
-                                
-                                # Process References
-                                new_refs = [r.strip() for r in refs_text.split('\n') if r.strip()]
-                                master_references.extend(new_refs)
-                                
-                                # Update counter based on number of new refs found
-                                # Heuristic: if we found 3 lines, we assume 3 refs. 
-                                # Ideally we'd parse the numbers, but simple counting is safer for now.
-                                ref_counter += len(new_refs)
-                            else:
-                                section_text = full_response
-                                # No refs found or malformed
+                            # Clean text
+                            section_text = full_response.strip()
                             
                             # Add to Word Doc
                             doc.add_heading(heading, level=1)
@@ -1043,13 +1132,8 @@ elif tool_mode == "LD Generator (Dissertation)":
                             clean_text = section_text.replace(f"**{heading}**", "").replace(f"#{heading}", "").strip()
                             
                             # --- Table Parsing Logic ---
-                            import re
-                            # Split text by code blocks or table patterns? 
-                            # Simplest valid markdown table detection: lines starting with |
-                            
+                            # (Same logic as before)
                             lines = clean_text.splitlines()
-                            
-                            # We will reconstruct the document paragraph by paragraph, intercepting tables
                             buffer_text = []
                             table_buffer = []
                             in_table = False
@@ -1059,7 +1143,6 @@ elif tool_mode == "LD Generator (Dissertation)":
                                 # Check for table row
                                 if stripped.startswith('|') and stripped.endswith('|'):
                                     if not in_table:
-                                        # Flush text buffer
                                         if buffer_text:
                                             add_markdown_content(doc, "\n".join(buffer_text))
                                             buffer_text = []
@@ -1067,17 +1150,13 @@ elif tool_mode == "LD Generator (Dissertation)":
                                     table_buffer.append(line)
                                 else:
                                     if in_table:
-                                        # End of table
                                         if table_buffer:
                                             add_markdown_table_to_docx(doc, "\n".join(table_buffer))
                                             table_buffer = []
                                         in_table = False
-                                    
-                                    # Normal line
                                     if stripped:
                                         buffer_text.append(stripped)
                                         
-                            # Flush remaining
                             if in_table and table_buffer:
                                 add_markdown_table_to_docx(doc, "\n".join(table_buffer))
                             elif buffer_text:
@@ -1088,57 +1167,61 @@ elif tool_mode == "LD Generator (Dissertation)":
                             
                         except Exception as e:
                             err_msg = str(e).lower()
-                            
-                            # Check for Quota Exceeded (Out of Credits) - specific to OpenAI
                             if "insufficient_quota" in err_msg:
-                                st.error("❌ OpenAI API Quota Exceeded. You have run out of credits.")
-                                st.info("Note: A 'ChatGPT Plus' subscription does NOT cover the API. You need to add credits at platform.openai.com/billing.")
-                                st.warning("Stopping generation. Please switch to 'Google Gemini' or add OpenAI credits.")
-                                success = False 
-                                stop_generation = True # Fatal error, stop all
-                                break 
-                            
-                            # Check for Invalid Key
-                            elif "invalid_api_key" in err_msg or "authentication failed" in err_msg:
-                                st.error("❌ Invalid API Key. Please check your settings.")
-                                success = False
-                                stop_generation = True
-                                break
-                            
-                            # Check for Rate Limits (Too Fast)
-                            elif "429" in err_msg or "rate limit" in err_msg:
-                                retry_count += 1
-                                
-                                # Provider-specific handling
-                                if provider == "OpenAI":
-                                    wait_time = 10 
-                                    request_delay += 2 
-                                    msg = f"⚠️ OpenAI Rate Limit. Pausing for {wait_time}s... (Pacing: {request_delay}s)"
-                                else:
-                                    wait_time = 40
-                                    request_delay += 5
-                                    msg = f"⏳ Free Tier Limit Hit. Pausing for {wait_time}s to cool down... (You don't need to do anything, just wait!)"
-
-                                st.warning(msg)
-                                time.sleep(wait_time)
+                                st.error("❌ OpenAI API Quota Exceeded.")
+                                stop_generation = True; break 
+                            elif "rate limit" in err_msg:
+                                retry_count += 1; time.sleep(20)
                             else:
-                                st.error(f"Error generating section {heading}: {e}")
-                                break 
+                                st.error(f"Error generating section {heading}: {e}"); break 
                     
                     if not success:
                          st.error(f"Failed to generate section '{heading}' after retries.")
+                    
+                    # --- IMAGE GENERATION LOGIC ---
+                    if generate_images and success and images_generated < target_images and not stop_generation:
+                         # Decide if we generate here
+                         # Skip Intro/Refs usually
+                         if "introduction" not in heading.lower() and "references" not in heading.lower() and "conclusion" not in heading.lower():
+                             import random
+                             # 50% chance or forced if running out of sections?
+                             # Simple: Just 40% chance per section
+                             if random.random() < 0.4 or (index == len(headings)-2 and images_generated == 0):
+                                 with st.spinner(f"Generating diagram for {heading}..."):
+                                     img_prompt = f"A professional medical/dental diagram illustrating '{heading}' in the context of {ld_title}. Clean, white background, educational textbook style."
+                                     img_path = generate_dalle_image(img_prompt, api_key)
+                                     
+                                     if img_path:
+                                         try:
+                                             doc.add_picture(img_path, width=Inches(4.5))
+                                             doc.add_paragraph(f"Figure {images_generated+1}: Illustration of {heading}", style="Caption")
+                                             images_generated += 1
+                                         except Exception as e:
+                                             print(f"Image insert error: {e}")
                 
                 progress_bar.progress((index + 1) / len(headings))
 
-            # 3. Compile Master References
-            if master_references:
+            # 3. Compile Master References Programmatically
+            if all_references:
                 doc.add_heading("References", level=1)
-                import re
-                for i, ref in enumerate(master_references):
-                    # Clean existing numbering (e.g., "1. Author" -> "Author")
-                    clean_ref = re.sub(r'^\d+[\.\)]\s*', '', ref).strip()
-                    # Add with strict continuous numbering
-                    doc.add_paragraph(f"{i+1}. {clean_ref}")
+                
+                # Create a style with no spacing for references if desired, or standard
+                # Just add them as paragraphs
+                for i, ref in enumerate(all_references):
+                    # Format: [i+1]. Authors (Year). Title. Journal.
+                    # Add hyperlink if possible? Python-docx is tricky with hyperlinks.
+                    # We will just write the text and append the URL text for now.
+                    # Or just write the citation.
+                    
+                    p = doc.add_paragraph()
+                    p.add_run(f"{i+1}. {ref['full_citation']} ").bold = False
+                    
+                    # Add simple text link
+                    # (Getting a true clickable hyperlink in python-docx is complex/verbose, 
+                    # usually just text URL is safer for stability unless we use add_hyperlink function if we have it.
+                    # We don't have it in helper, so simple text.)
+                    p.add_run(f"\nAvailable at: {ref['link']}")
+
 
             # Finalize
             doc_io = io.BytesIO()

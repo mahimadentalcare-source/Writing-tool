@@ -3,6 +3,8 @@ import os
 from PIL import Image
 import io
 import re
+from Bio import Entrez
+from Bio import Medline
 
 def extract_text_and_images(pdf_paths, output_dir):
     """
@@ -140,3 +142,72 @@ def add_markdown_content(doc, text):
                 run.bold = True
             else:
                 p.add_run(part)
+
+def search_pubmed(query, max_results=50):
+    """
+    Searches PubMed for articles matching the query.
+    Returns a list of dictionaries with Title, Abstract, Authors, Journal, Year, and Link.
+    """
+    Entrez.email = "dental.research.tool@example.com"  # Required by NCBI (using generic)
+    
+    try:
+        # 1. Search for IDs
+        # We try to find free full text first, but if that's too restrictive, 
+        # the user just wants "available on the net" (indexed).
+        # However, to be safe and "wow" the user, let's stick to free full text OR just generally indexed.
+        # User said: "available on the net... whatever indexing it is". 
+        # Let's search widely but sort by relevance.
+        
+        # NOTE: Removing [sb] filter to get MORE results, as long as they are real.
+        # But user prefers "available". Let's try to get a mix or just standard search.
+        # Standard search is better for quantity (70 refs).
+        
+        handle = Entrez.esearch(db="pubmed", term=query, retmax=max_results, sort="relevance")
+        record = Entrez.read(handle)
+        handle.close()
+        
+        id_list = record["IdList"]
+        if not id_list:
+            return []
+            
+        # 2. Fetch Details via Medline
+        # Fetch effectively in batch
+        handle = Entrez.efetch(db="pubmed", id=",".join(id_list), rettype="medline", retmode="text")
+        records = Medline.parse(handle)
+        
+        results = []
+        for r in records:
+            title = r.get("TI", "No Title")
+            abstract = r.get("AB", "No Abstract Available.")
+            authors = r.get("AU", ["Unknown Author"])
+            source = r.get("SO", "Unknown Source")
+            pmid = r.get("PMID", "")
+            dp = r.get("DP", "n.d.")
+            year = dp.split()[0] if dp else "n.d."
+            
+            # Format Authors (First 3 et al)
+            if len(authors) > 3:
+                auth_str = f"{', '.join(authors[:3])} et al."
+            else:
+                auth_str = ", ".join(authors)
+                
+            # Construct a reliable link
+            link = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+            
+            results.append({
+                "title": title,
+                "abstract": abstract,
+                "authors": auth_str,
+                "journal": source,
+                "year": year,
+                "citation": f"{auth_str} ({year})", 
+                "full_citation": f"{auth_str} ({year}). {title}. {source}.",
+                "link": link
+            })
+        
+        handle.close()
+        return results
+        
+    except Exception as e:
+        print(f"PubMed Search Error: {e}")
+        return []

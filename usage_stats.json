@@ -17,5 +17,11 @@
         "tokens_out": 12691,
         "images": 0,
         "cost": 0.0
+    },
+    "2026-02-20": {
+        "tokens_in": 379676,
+        "tokens_out": 168373,
+        "images": 0,
+        "cost": 0.0
     }
 }
